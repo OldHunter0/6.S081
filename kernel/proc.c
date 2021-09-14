@@ -20,6 +20,9 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+extern char etext[];
+
+pagetable_t proc_kernel_pagetable(void);
 
 // initialize the proc table at boot time.
 void
@@ -30,16 +33,15 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
       char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
+      if (pa == 0) panic("kalloc");
+      uint64 va = KSTACK((int)(p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
+      p->kstack_p=(uint64)pa;
   }
   kvminithart();
 }
@@ -121,6 +123,11 @@ found:
     return 0;
   }
 
+  //initialize kernel pagetable
+  p->kernel_pagetable=proc_kernel_pagetable();
+
+  mappages(p->kernel_pagetable,p->kstack,PGSIZE,p->kstack_p,PTE_R | PTE_W);
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +149,18 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if(p->kernel_pagetable){
+    pagetable_t proc_kernel_pagetable=p->kernel_pagetable;
+    uvmunmap(proc_kernel_pagetable,p->kstack,1,1);
+    uvmunmap(proc_kernel_pagetable,UART0,1,0);
+    uvmunmap(proc_kernel_pagetable,VIRTIO0,1,0);
+    uvmunmap(proc_kernel_pagetable,CLINT,0x10000/PGSIZE,0);
+    uvmunmap(proc_kernel_pagetable,PLIC,0x400000/PGSIZE,0);
+    uvmunmap(proc_kernel_pagetable,KERNBASE,((uint64)etext-KERNBASE)/PGSIZE,0);
+    uvmunmap(proc_kernel_pagetable,(uint64)etext,(PHYSTOP-(uint64)etext)/PGSIZE,0);
+    uvmunmap(proc_kernel_pagetable,TRAMPOLINE,1,0);
+  }
+  p->kernel_pagetable=0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -183,6 +202,53 @@ proc_pagetable(struct proc *p)
   }
 
   return pagetable;
+}
+
+
+//create a kernel page table for a given process
+pagetable_t
+proc_kernel_pagetable(void)
+{
+  pagetable_t kernel_pagetable;
+  kernel_pagetable=(pagetable_t) kalloc();
+  memset(kernel_pagetable, 0, PGSIZE);
+
+  // uart registers
+  if(mappages(kernel_pagetable,UART0,PGSIZE,UART0,PTE_R | PTE_W)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  // virtio mmio disk interface
+  if(mappages(kernel_pagetable,VIRTIO0,PGSIZE,VIRTIO0,PTE_R | PTE_W)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  // CLINT
+  if(mappages(kernel_pagetable,CLINT,0x10000,CLINT,PTE_R | PTE_W)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  // PLIC
+  if(mappages(kernel_pagetable,PLIC,0x400000,PLIC,PTE_R | PTE_W)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  // map kernel text executable and read-only.
+  if(mappages(kernel_pagetable,KERNBASE,(uint64)etext-KERNBASE,KERNBASE,PTE_R | PTE_X)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  // map kernel data and the physical RAM we'll make use of.
+  if(mappages(kernel_pagetable,(uint64)etext,PHYSTOP-(uint64)etext,(uint64)etext,PTE_R | PTE_W)!=0){
+    panic("process kernel pagetable map");
+  }
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  if(mappages(kernel_pagetable,TRAMPOLINE,PGSIZE,(uint64)trampoline,PTE_R | PTE_X)!=0){
+    panic("process kernel pagetable map");
+  }
+
+  return kernel_pagetable;
 }
 
 // Free a process's page table, and free the
@@ -460,10 +526,11 @@ scheduler(void)
   struct cpu *c = mycpu();
   
   c->proc = 0;
+  kvminithart();
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-    
+
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
@@ -474,11 +541,13 @@ scheduler(void)
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
+        w_satp(MAKE_SATP(p->kernel_pagetable));
+        sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-
+        kvminithart();
         found = 1;
       }
       release(&p->lock);
