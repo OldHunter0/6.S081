@@ -2506,10 +2506,9 @@ execout(char *s)
         uint64 a = (uint64) sbrk(4096);
         if(a == 0xffffffffffffffffLL)
           break;
-        printf("a=%x\n",a);
         *(char*)(a + 4096 - 1) = 1;
       }
-
+      printf("alloc all memory\n");
       // free a few pages, in order to let exec() make some
       // progress.
       for(int i = 0; i < avail; i++)

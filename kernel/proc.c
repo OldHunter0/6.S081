@@ -18,11 +18,12 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
+static void proc_freekernelpagetable(pagetable_t pagetable);
 
 extern char trampoline[]; // trampoline.S
 extern char etext[];
 
-pagetable_t proc_kernel_pagetable(void);
+void proc_kernel_pagetable(struct proc *p);
 
 // initialize the proc table at boot time.
 void
@@ -124,9 +125,8 @@ found:
   }
 
   //initialize kernel pagetable
-  p->kernel_pagetable=proc_kernel_pagetable();
+  proc_kernel_pagetable(p);
 
-  mappages(p->kernel_pagetable,p->kstack,PGSIZE,p->kstack_p,PTE_R | PTE_W);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -150,15 +150,7 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   if(p->kernel_pagetable){
-    pagetable_t proc_kernel_pagetable=p->kernel_pagetable;
-    uvmunmap(proc_kernel_pagetable,p->kstack,1,1);
-    uvmunmap(proc_kernel_pagetable,UART0,1,0);
-    uvmunmap(proc_kernel_pagetable,VIRTIO0,1,0);
-    uvmunmap(proc_kernel_pagetable,CLINT,0x10000/PGSIZE,0);
-    uvmunmap(proc_kernel_pagetable,PLIC,0x400000/PGSIZE,0);
-    uvmunmap(proc_kernel_pagetable,KERNBASE,((uint64)etext-KERNBASE)/PGSIZE,0);
-    uvmunmap(proc_kernel_pagetable,(uint64)etext,(PHYSTOP-(uint64)etext)/PGSIZE,0);
-    uvmunmap(proc_kernel_pagetable,TRAMPOLINE,1,0);
+    proc_freekernelpagetable(p->kernel_pagetable);
   }
   p->kernel_pagetable=0;
   p->sz = 0;
@@ -206,49 +198,49 @@ proc_pagetable(struct proc *p)
 
 
 //create a kernel page table for a given process
-pagetable_t
-proc_kernel_pagetable(void)
+void
+proc_kernel_pagetable(struct proc *p)
 {
-  pagetable_t kernel_pagetable;
-  kernel_pagetable=(pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
+  
+  p->kernel_pagetable=(pagetable_t) kalloc();
+  memset(p->kernel_pagetable, 0, PGSIZE);
 
   // uart registers
-  if(mappages(kernel_pagetable,UART0,PGSIZE,UART0,PTE_R | PTE_W)!=0){
+  if(mappages(p->kernel_pagetable,UART0,PGSIZE,UART0,PTE_R | PTE_W)!=0){
     panic("process kernel pagetable map");
   }
 
   // virtio mmio disk interface
-  if(mappages(kernel_pagetable,VIRTIO0,PGSIZE,VIRTIO0,PTE_R | PTE_W)!=0){
+  if(mappages(p->kernel_pagetable,VIRTIO0,PGSIZE,VIRTIO0,PTE_R | PTE_W)!=0){
     panic("process kernel pagetable map");
   }
 
   // CLINT
-  if(mappages(kernel_pagetable,CLINT,0x10000,CLINT,PTE_R | PTE_W)!=0){
+  if(mappages(p->kernel_pagetable,CLINT,0x10000,CLINT,PTE_R | PTE_W)!=0){
     panic("process kernel pagetable map");
   }
 
   // PLIC
-  if(mappages(kernel_pagetable,PLIC,0x400000,PLIC,PTE_R | PTE_W)!=0){
+  if(mappages(p->kernel_pagetable,PLIC,0x400000,PLIC,PTE_R | PTE_W)!=0){
     panic("process kernel pagetable map");
   }
 
   // map kernel text executable and read-only.
-  if(mappages(kernel_pagetable,KERNBASE,(uint64)etext-KERNBASE,KERNBASE,PTE_R | PTE_X)!=0){
+  if(mappages(p->kernel_pagetable,KERNBASE,(uint64)etext-KERNBASE,KERNBASE,PTE_R | PTE_X)!=0){
     panic("process kernel pagetable map");
   }
 
   // map kernel data and the physical RAM we'll make use of.
-  if(mappages(kernel_pagetable,(uint64)etext,PHYSTOP-(uint64)etext,(uint64)etext,PTE_R | PTE_W)!=0){
+  if(mappages(p->kernel_pagetable,(uint64)etext,PHYSTOP-(uint64)etext,(uint64)etext,PTE_R | PTE_W)!=0){
     panic("process kernel pagetable map");
   }
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
-  if(mappages(kernel_pagetable,TRAMPOLINE,PGSIZE,(uint64)trampoline,PTE_R | PTE_X)!=0){
+  if(mappages(p->kernel_pagetable,TRAMPOLINE,PGSIZE,(uint64)trampoline,PTE_R | PTE_X)!=0){
     panic("process kernel pagetable map");
   }
 
-  return kernel_pagetable;
+  mappages(p->kernel_pagetable,p->kstack,PGSIZE,p->kstack_p,PTE_R | PTE_W);
 }
 
 // Free a process's page table, and free the
@@ -540,9 +532,9 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
         w_satp(MAKE_SATP(p->kernel_pagetable));
         sfence_vma();
+        swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -765,4 +757,20 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+//free per process kernel pagetable,with free leaf physical memory pages
+static void proc_freekernelpagetable(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      proc_freekernelpagetable((pagetable_t)child);
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
 }
