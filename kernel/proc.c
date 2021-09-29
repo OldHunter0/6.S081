@@ -759,7 +759,7 @@ procdump(void)
   }
 }
 
-//free per process kernel pagetable,with free leaf physical memory pages
+//free per process kernel pagetable,without free leaf physical memory pages
 static void proc_freekernelpagetable(pagetable_t pagetable)
 {
   // there are 2^9 = 512 PTEs in a page table.
