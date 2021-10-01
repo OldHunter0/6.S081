@@ -127,7 +127,6 @@ found:
   //initialize kernel pagetable
   proc_kernel_pagetable(p);
 
-
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
