@@ -298,21 +298,20 @@ growproc(int n)
 {
   uint sz;
   struct proc *p = myproc();
-  pagetable_t old_kernel_pagetable=0;
 
   sz = p->sz;
   if(n > 0){
+    if(sz+n>PLIC){
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    copy_pagetable(p->pagetable,p->kernel_pagetable,sz-n,sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
-  old_kernel_pagetable=p->kernel_pagetable;
-  proc_kernel_pagetable(p);
-  proc_freekernelpagetable(old_kernel_pagetable);
-  copy_pagetable(p->pagetable,p->kernel_pagetable,0,sz);
   return 0;
 }
 
@@ -337,7 +336,6 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
-  copy_pagetable(np->pagetable,np->kernel_pagetable,0,np->sz);
 
   np->parent = p;
 
@@ -353,6 +351,7 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  copy_pagetable(np->pagetable,np->kernel_pagetable,0,np->sz);
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;

@@ -113,12 +113,7 @@ exec(char *path, char **argv)
   p->pagetable = pagetable;
   p->sz = sz;
 
-  proc_kernel_pagetable(p);
-  printf("%s",path);
-  // proc_freekernelpagetable(old_kernel_pagetable);
-  printf("4");
-  copy_pagetable(p->pagetable,p->kernel_pagetable,0,sz);
-  printf("5");
+  copy_pagetable(p->pagetable,p->kernel_pagetable,0,p->sz);
   
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
