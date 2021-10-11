@@ -18,12 +18,12 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
-static void proc_freekernelpagetable(pagetable_t pagetable);
 
 extern char trampoline[]; // trampoline.S
 extern char etext[];
 
 void proc_kernel_pagetable(struct proc *p);
+void proc_freekernelpagetable(pagetable_t pagetable);
 
 // initialize the proc table at boot time.
 void
@@ -277,6 +277,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  copy_pagetable(p->pagetable,p->kernel_pagetable,0,PGSIZE);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -297,6 +298,7 @@ growproc(int n)
 {
   uint sz;
   struct proc *p = myproc();
+  pagetable_t old_kernel_pagetable=0;
 
   sz = p->sz;
   if(n > 0){
@@ -307,6 +309,10 @@ growproc(int n)
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
+  old_kernel_pagetable=p->kernel_pagetable;
+  proc_kernel_pagetable(p);
+  proc_freekernelpagetable(old_kernel_pagetable);
+  copy_pagetable(p->pagetable,p->kernel_pagetable,0,sz);
   return 0;
 }
 
@@ -331,6 +337,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  copy_pagetable(np->pagetable,np->kernel_pagetable,0,np->sz);
 
   np->parent = p;
 
@@ -759,7 +766,7 @@ procdump(void)
 }
 
 //free per process kernel pagetable,without free leaf physical memory pages
-static void proc_freekernelpagetable(pagetable_t pagetable)
+void proc_freekernelpagetable(pagetable_t pagetable)
 {
   // there are 2^9 = 512 PTEs in a page table.
   for(int i = 0; i < 512; i++){
@@ -769,6 +776,9 @@ static void proc_freekernelpagetable(pagetable_t pagetable)
       uint64 child = PTE2PA(pte);
       proc_freekernelpagetable((pagetable_t)child);
       pagetable[i] = 0;
+    }else if(pte & PTE_V){
+      // this PTE points to leaf mapping
+      pagetable[i]=0;
     }
   }
   kfree((void*)pagetable);

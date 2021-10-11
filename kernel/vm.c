@@ -461,3 +461,21 @@ vmprint(pagetable_t pagetable)
   printf("page table %p\n",pagetable);
   vmprint_recur(pagetable,1);
 }
+
+void copy_pagetable(pagetable_t pagetable,pagetable_t kernel_pagetable,uint64 begin,uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+
+  for (int i = begin; i < sz&&i<PLIC; i += PGSIZE) {
+    pte=walk(pagetable,i,0);
+    pa=PTE2PA(*pte);
+    flags=PTE_FLAGS(*pte);
+    flags=flags&(0x3FF-PTE_U);
+    if(mappages(kernel_pagetable,i,PGSIZE,pa,flags)!=0){
+      panic("error when copying process's pagetable to it's kernel_pagetable");
+    }
+    printf("copy end \n");
+  }
+}
